@@ -1,5 +1,5 @@
 """
-ss_capture.py  v1.0
+ss_capture.py  v1.1
 アクティブウィンドウ／全画面スクリーンショットをホットキーで保存するツール
 
 作者  : ふぁん × Claude Code
@@ -282,6 +282,7 @@ class App(tk.Tk):
         self._cb_polling      = False
         self._poll_after_id   = None
         self._last_cb_save_time = 0.0
+        self._capturing       = False  # ホットキーキャプチャ中フラグ
 
         self._build_ui()
         self._register_hotkeys()
@@ -340,7 +341,7 @@ class App(tk.Tk):
         self._hk_hint.grid(row=2, column=0, columnspan=3, pady=(6, 0))
 
         # suppress / クリップボード
-        self._suppress_var = tk.BooleanVar(value=self._cfg.get("suppress", False))
+        self._suppress_var = tk.BooleanVar(value=self._cfg.get("suppress", True))
         ttk.Checkbutton(
             hk_frame, variable=self._suppress_var,
             text="他のアプリにキーを渡さない（suppress）",
@@ -504,7 +505,8 @@ class App(tk.Tk):
             seq = win32clipboard.GetClipboardSequenceNumber()
             if seq != self._cb_seq:
                 self._cb_seq = seq
-                self._save_clipboard_image()
+                if not self._capturing:
+                    self._save_clipboard_image()
         except Exception:
             pass  # 例外が起きてもループは継続
         self._poll_after_id = self.after(300, self._poll_clipboard)
@@ -568,15 +570,18 @@ class App(tk.Tk):
         return win32gui.GetForegroundWindow()
 
     def _do_capture_win(self):
+        self._capturing = True
         result = capture_hwnd(self._resolve_hwnd(), self._save_root)
         self._finish_capture(result)
 
     def _do_capture_full(self):
+        self._capturing = True
         result = capture_fullscreen(self._save_root)
         self._finish_capture(result)
 
     def _finish_capture(self, result):
         if result is None:
+            self._capturing = False
             self.after(0, lambda: self._log_write("キャプチャ失敗"))
             return
         title, img, path = result
@@ -589,6 +594,8 @@ class App(tk.Tk):
                 suffix = " + クリップボード"
             except Exception:
                 pass
+        self._last_cb_save_time = time.time()
+        self._capturing = False
         self.after(0, lambda: self._update_ui(path, title, suffix))
 
     def _update_ui(self, path: Path, title: str, suffix: str):
