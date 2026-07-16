@@ -1,0 +1,8 @@
+# ビルド生成物
+build/
+dist/
+*.pyc
+__pycache__/
+
+# 配布バイナリ（GitHub Release に添付する運用）
+SSCapture.exe
