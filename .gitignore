@@ -6,3 +6,6 @@ __pycache__/
 
 # 配布バイナリ（GitHub Release に添付する運用）
 SSCapture.exe
+
+# 公開用の宣伝下書き（内部素材・リポジトリには含めない）
+pr_materials.md
