@@ -132,14 +132,73 @@ def copy_to_clipboard(img: Image.Image):
     win32clipboard.CloseClipboard()
 
 
-def _clipboard_has_files() -> bool:
-    """クリップボードにファイル一覧(CF_HDROP)が入っているか。
-    エクスプローラでのファイルコピーはこの形式になるため、
-    画像ビットマップのコピーと区別して除外するために使う。"""
+def _clipboard_image_kind() -> str | None:
+    """クリップボードの中身を判定する。
+      'bitmap' : 本物のビットマップ(CF_DIB)がある → 保存対象
+                 （Win+Shift+S は CF_DIB を必ず載せる）
+      'files'  : ビットマップは無くファイル一覧(CF_HDROP)だけ → 無視
+                 （エクスプローラでのファイルコピー等）
+      None     : 画像ではない（テキスト等）
+    CF_DIB を優先して見るのがポイント。Win+Shift+S は撮影直後に
+    CF_HDROP(一時PNGへの参照)を追加するが、CF_DIB も同時に載っているため、
+    HDROP の有無で弾かず DIB の有無で判定することで両者を正しく区別できる。"""
     try:
-        return bool(win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP))
+        has_dib = win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB)
+        has_files = win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP)
     except Exception:
-        return False
+        return None
+    if has_dib:
+        return "bitmap"
+    if has_files:
+        return "files"
+    return None
+
+
+def _dib_to_image(dib: bytes) -> Image.Image | None:
+    """CF_DIB のバイト列(BITMAPINFOHEADER+画素)を PIL Image に変換する。
+    先頭に 14 バイトの BITMAPFILEHEADER を付けて BMP として読み込む。"""
+    import struct
+    try:
+        header_size = struct.unpack_from("<I", dib, 0)[0]
+        bit_count   = struct.unpack_from("<H", dib, 14)[0]
+        compression = struct.unpack_from("<I", dib, 16)[0]
+        clr_used    = struct.unpack_from("<I", dib, 32)[0]
+        # パレット / カラーマスクのサイズを求めて画素データ開始位置を算出
+        if bit_count <= 8:
+            n_colors = clr_used if clr_used else (1 << bit_count)
+            palette_size = n_colors * 4
+        else:
+            palette_size = 12 if compression == 3 else 0  # BI_BITFIELDS
+            palette_size += clr_used * 4
+        pixel_offset = 14 + header_size + palette_size
+        file_size = 14 + len(dib)
+        bmp_header = b"BM" + struct.pack("<IHHI", file_size, 0, 0, pixel_offset)
+        return Image.open(io.BytesIO(bmp_header + dib))
+    except Exception:
+        return None
+
+
+def _grab_clipboard_bitmap() -> Image.Image | None:
+    """クリップボードの CF_DIB を直接読み取って画像を返す。
+    grabclipboard() は CF_HDROP があるとファイル一覧を優先してしまうため、
+    ビットマップを確実に取るには DIB を直接読む必要がある。
+    クリップボードを他プロセスが掴んでいて開けない場合は None（次回ポールに委ねる）。"""
+    try:
+        win32clipboard.OpenClipboard()
+    except Exception:
+        return None
+    try:
+        if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
+            return None
+        dib = win32clipboard.GetClipboardData(win32clipboard.CF_DIB)
+    except Exception:
+        return None
+    finally:
+        try:
+            win32clipboard.CloseClipboard()
+        except Exception:
+            pass
+    return _dib_to_image(dib)
 
 
 # ---- スタートアップ -------------------------------------------
@@ -522,31 +581,20 @@ class App(tk.Tk):
         self._poll_after_id = self.after(300, self._poll_clipboard)
 
     def _save_clipboard_image(self):
-        # 1秒以内の連続保存を防ぐ（Win+Shift+Sが複数回シーケンスを更新する対策）
+        # 連続保存を防ぐ（Win+Shift+Sは1回の撮影でシーケンスを2回更新するため
+        # 1.5秒のガードで2回目の重複保存を吸収する）
         now = time.time()
-        if now - self._last_cb_save_time < 1.0:
+        if now - self._last_cb_save_time < 1.5:
             return
-        # エクスプローラ等のファイルコピー(CF_HDROP)には反応しない
-        if _clipboard_has_files():
+        # CF_DIB(本物のビットマップ)がある時だけ保存。
+        # エクスプローラのファイルコピー(CF_HDROPのみ)やテキストは無視。
+        kind = _clipboard_image_kind()
+        if kind != "bitmap":
             return
-        try:
-            img = ImageGrab.grabclipboard()
-        except Exception:
-            return
-        # Windows 11 Snipping Tool はファイルパスのリストを返すことがある
-        if isinstance(img, list):
-            for item in img:
-                p = Path(str(item))
-                if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".gif"):
-                    try:
-                        img = Image.open(p)
-                        break
-                    except Exception:
-                        pass
-            else:
-                return
+        # grabclipboard は CF_HDROP を優先してしまうので DIB を直接読む
+        img = _grab_clipboard_bitmap()
         if not isinstance(img, Image.Image):
-            return
+            return  # 取得できなければ次のシーケンス更新/ポールに委ねる
         folder = get_save_folder(self._save_root)
         path = folder / f"{next_index(folder):04d}.png"
         img.save(path)
